@@ -1,0 +1,11 @@
+.env
+node_modules/
+.venv/
+__pycache__/
+.pytest_cache/
+build/
+.dart_tool/
+uploads/
+.cache_tuiles/
+*.log
+candidats.json

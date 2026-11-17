@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ouaga
+      POSTGRES_PASSWORD: ouaga
+      POSTGRES_DB: ouaga
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ouaga"]
+      interval: 5s
+      retries: 10
+
+  moteur:
+    build: ../moteur
+    environment:
+      ENGINE_API_KEY: ${ENGINE_API_KEY:-changez-moi}
+    ports:
+      - "8000:8000"
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      moteur:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://ouaga:ouaga@db:5432/ouaga
+      JWT_SECRET: ${JWT_SECRET:?définissez JWT_SECRET (32 caractères minimum)}
+      ENGINE_URL: http://moteur:8000
+      ENGINE_API_KEY: ${ENGINE_API_KEY:-changez-moi}
+      UPLOAD_DIR: /srv/uploads
+    volumes:
+      - uploads:/srv/uploads
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  uploads:

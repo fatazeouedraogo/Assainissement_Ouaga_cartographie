@@ -1,0 +1,1 @@
+mos.json (mooré) et dyu.json (dioula) sont vides volontairement : chaque valeur doit être saisie ou validée par un locuteur. Les clés non traduites s'affichent en français.

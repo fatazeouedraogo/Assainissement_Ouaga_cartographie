@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ouaga Propre · tableau de bord public</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<div class="band" aria-hidden="true"></div>
+<header>
+  <h1>OUAGA<br>PROPRE</h1>
+  <p>Les dépotoirs de la ville, leur état, et ce qui est fait. Données ouvertes.</p>
+</header>
+<main>
+  <section class="kpis" id="kpis"></section>
+  <section class="mapwrap"><div id="map" role="img" aria-label="Carte des dépotoirs"></div>
+    <ul class="legend"><li><i class="d v"></i>Vérifié</li><li><i class="d s"></i>Programmé</li><li><i class="d c"></i>Nettoyé</li></ul>
+  </section>
+  <section class="cols">
+    <div><h2>Lieux qui reviennent</h2><ol id="hot" class="list"></ol></div>
+    <div><h2>Ceux qui font bouger les choses</h2><ol id="lead" class="list"></ol></div>
+  </section>
+  <p class="foot">Données : © contributeurs OpenStreetMap, signalements citoyens vérifiés. <a href="/api/public/dumps.geojson">Télécharger le GeoJSON</a></p>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
