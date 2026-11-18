@@ -1,6 +1,7 @@
 import io
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -256,3 +257,77 @@ def test_evaluation_counts_true_and_false_positives():
 def test_evaluation_requires_truth():
     r = client.post("/v1/satellite/evaluate", json={"candidates": [], "truth": []})
     assert r.status_code == 422
+
+
+def test_sensors_mark_urgent_points_and_seed_stock(city):
+    base = client.post("/v1/plan", json={**city, "time_limit_s": 2}).json()
+    p = base["points"][0]
+    sensors = [{"lat": p["lat"], "lon": p["lon"], "fill_ratio": 0.95}]
+    r = client.post("/v1/plan", json={**city, "sensors": sensors, "params": {"trucks": 1, "trips_per_day": 1}, "time_limit_s": 2}).json()
+    urgent = [x for x in r["points"] if x.get("urgent")]
+    assert len(urgent) == 1 and r["metrics"]["urgent_points"] == 1
+    served = {s for g in r["groups"] for rt in g["routes"] for s in rt["stops"]}
+    assert urgent[0]["id"] in served
+    sim = client.post("/v1/simulate", json={**city, "sensors": sensors, "params": {"replications": 3, "horizon_days": 1, "trucks": 0}, "time_limit_s": 2}).json()["simulation"]["summary"]
+    assert sim["stock_in_points_kg"]["mean"] > 0.9 * 0.95 * 3000
+
+
+def test_learning_converges_on_best_response(city):
+    body = {**city, "params": {"trucks": 2}, "events": [{"kind": "truck_breakdown", "value": 1}], "episodes": 40, "time_limit_s": 1}
+    r = client.post("/v1/learn/respond", json=body).json()
+    assert sum(x["new_pulls"] for x in r["policy"]) == 40
+    assert r["policy"][0]["value"] >= r["policy"][-1]["value"]
+    r2 = client.post("/v1/learn/respond", json={**body, "prior": r["state"], "episodes": 20}).json()
+    assert sum(x["pulls"] for x in r2["policy"]) > sum(x["pulls"] for x in r["policy"])
+
+
+def test_precollector_plans(city):
+    r = client.post("/v1/precollectors", json={**city, "params": {"precollectors": 6, "subscription_rate": 0.5}}).json()
+    assert len(r["precollectors"]) == 6
+    first = r["precollectors"][0]
+    assert first["stops"] > 0 and first["km"] > 0 and first["revenue_month"] > 0
+    assert sum(p["households"] for p in r["precollectors"]) == pytest.approx(len(city["households"]) * 0.5, rel=0.02)
+
+
+def test_imagery_mosaic_from_local_tiles(tmp_path):
+    from app.imagery import fetch_mosaic
+
+    z = 15
+    import math as m
+
+    def tile(lat, lon):
+        n = 2.0**z
+        return int((lon + 180) / 360 * n), int((1 - m.asinh(m.tan(m.radians(lat))) / m.pi) / 2 * n)
+
+    bbox = (12.360, -1.530, 12.375, -1.515)
+    x0, y0 = tile(bbox[2], bbox[1])
+    x1, y1 = tile(bbox[0], bbox[3])
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            Image.new("RGB", (256, 256), (x % 256, y % 256, 90)).save(tmp_path / f"{z}_{x}_{y}.png")
+    img = fetch_mosaic(bbox, z, f"file://{tmp_path}/{{z}}_{{x}}_{{y}}.png")
+    assert img.size[0] > 50 and img.size[1] > 50
+    assert abs(img.size[0] / img.size[1] - ((bbox[3] - bbox[1]) / (bbox[2] - bbox[0]) / 1.0) * 0.9856) < 0.2
+
+
+def test_clip_interpretation_is_independent_of_torch():
+    from app.photo import interpret_clip
+
+    dump = {"garbage": 0.7, "rubble": 0.05, "plastic": 0.05, "organic": 0.0, "clean": 0.1, "person": 0.05, "indoor": 0.03, "landscape": 0.02}
+    selfie = {"garbage": 0.02, "rubble": 0.01, "plastic": 0.01, "organic": 0.0, "clean": 0.1, "person": 0.8, "indoor": 0.04, "landscape": 0.02}
+    assert interpret_clip(dump)["not_a_dump"] is False and interpret_clip(dump)["waste_type"] == "household"
+    assert interpret_clip(selfie)["not_a_dump"] is True
+    assert interpret_clip(dump, min_waste=0.95)["not_a_dump"] is True
+
+
+def test_threshold_sweep_recommends_safe_cut():
+    from app.evaluation import threshold_sweep
+
+    r = threshold_sweep([0.9, 0.8, 0.75, 0.4], [0.5, 0.2, 0.1, 0.05])
+    assert r["best_f1"]["threshold"] in (0.75, 0.4, 0.8)
+    assert r["keep_95_percent_of_dumps"]["recall"] == 1.0
+    assert threshold_sweep([], [0.1])["error"]
+
+
+def test_health_reports_clip_state():
+    assert client.get("/health").json()["clip"] == "disabled"

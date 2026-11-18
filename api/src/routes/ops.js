@@ -153,11 +153,15 @@ settings.get('/', requireAuth, staff, wrap(async (_req, res) => {
   res.json(Object.fromEntries(rows.map((r) => [r.key, r.value])));
 }));
 settings.put('/:key', requireAuth, admin, wrap(async (req, res) => {
-  const key = z.enum(['depot', 'landfill', 'thresholds']).parse(req.params.key);
-  const schema = key === 'thresholds'
+  const key = z.enum(['depot', 'landfill', 'thresholds', 'detection', 'subscription']).parse(req.params.key);
+  const schema = key === 'detection'
+    ? z.object({ min_score: z.number().min(0).max(30), merge_m: z.number().min(5).max(300), risk_weight: z.number().min(0).max(2) })
+    : key === 'subscription'
+    ? z.object({ price_month: z.number().int().min(0).max(100000) })
+    : key === 'thresholds'
     ? z.object({ auto_verify_confidence: z.number().min(0.5).max(0.99), auto_verify_reporters: z.number().int().min(1).max(20), duplicate_radius_m: z.number().min(5).max(200) })
     : z.object({ lat: z.number().min(12.25).max(12.5), lon: z.number().min(-1.7).max(-1.35) });
   const v = schema.parse(req.body);
-  await query('UPDATE settings SET value = $2 WHERE key = $1', [key, JSON.stringify(key === 'thresholds' ? v : { ...v, placeholder: false })]);
+  await query('UPDATE settings SET value = $2 WHERE key = $1', [key, JSON.stringify(['thresholds', 'detection'].includes(key) ? v : key === 'subscription' ? { ...v, placeholder: false } : { ...v, placeholder: false })]);
   res.json({ ok: true });
 }));

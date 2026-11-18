@@ -76,14 +76,52 @@ insights.post('/pareto', staff, wrap(async (req, res) => {
 insights.post('/calibrate', admin, wrap(async (req, res) => {
   const b = z.object({
     metric: z.enum(['collection_rate', 'leakage_rate']).default('collection_rate'),
-    target: z.number().min(0).max(1),
+    target: z.number().min(0).max(1).optional(),
     parameter: z.string().default('subscription_rate'),
     low: z.number(),
     high: z.number(),
     params: z.record(z.any()).default({}),
   }).parse(req.body);
+  if (b.target === undefined) {
+    const o = await query('SELECT value FROM observations WHERE metric = $1 ORDER BY observed_on DESC, id DESC LIMIT 1', [b.metric]);
+    if (!o.rows[0]) throw new AppError(409, 'aucune_observation', 'Enregistrez une valeur observée (POST /api/insights/observations) ou donnez une cible');
+    b.target = o.rows[0].value;
+  }
   const { body } = await needInput();
   res.json(await engine.calibrate({ ...body, ...b, time_limit_s: 2 }));
+}));
+
+insights.post('/observations', admin, wrap(async (req, res) => {
+  const b = z.object({ metric: z.enum(['collection_rate', 'leakage_rate']), value: z.number().min(0).max(1), observed_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), note: z.string().max(300).optional() }).parse(req.body);
+  const { rows } = await query('INSERT INTO observations (metric, value, observed_on, note, created_by) VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), $4, $5) RETURNING id, metric, value, observed_on', [b.metric, b.value, b.observed_on ?? null, b.note ?? null, req.user.id]);
+  res.status(201).json(rows[0]);
+}));
+insights.get('/observations', staff, wrap(async (_req, res) => {
+  const { rows } = await query('SELECT id, metric, value, observed_on, note FROM observations ORDER BY observed_on DESC, id DESC LIMIT 100');
+  res.json({ observations: rows });
+}));
+
+insights.post('/learn', staff, wrap(async (req, res) => {
+  const b = z.object({ params: z.record(z.any()).default({}), events: z.array(z.record(z.any())).default([]), episodes: z.number().int().min(10).max(400).default(60) }).parse(req.body);
+  const { body } = await needInput();
+  const kinds = [...new Set(b.events.map((e) => e.kind))].sort().join('+') || 'base';
+  const context = `${kinds}|camions:${b.params.trucks ?? 'defaut'}`;
+  const prior = Object.fromEntries((await query('SELECT arm, n, mean, m2 FROM rl_state WHERE context = $1', [context])).rows.map((r) => [r.arm, { n: r.n, mean: r.mean, m2: r.m2 }]));
+  const out = await engine.learn({ ...body, params: b.params, events: b.events, episodes: b.episodes, prior, time_limit_s: 1 });
+  for (const [arm, st] of Object.entries(out.state)) {
+    await query(
+      `INSERT INTO rl_state (context, arm, n, mean, m2) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (context, arm) DO UPDATE SET n = $3, mean = $4, m2 = $5, updated_at = now()`,
+      [context, arm, st.n, st.mean, st.m2],
+    );
+  }
+  res.json({ context, ...out });
+}));
+
+insights.post('/precollectors', staff, wrap(async (req, res) => {
+  const b = z.object({ params: z.record(z.any()).default({}) }).parse(req.body);
+  const { body } = await needInput();
+  res.json(await engine.precollectors({ ...body, params: b.params }));
 }));
 
 insights.get('/risk', wrap(async (_req, res) => {

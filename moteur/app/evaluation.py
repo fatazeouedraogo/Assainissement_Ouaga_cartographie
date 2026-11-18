@@ -54,3 +54,24 @@ def evaluate(candidates: list[dict], truth: list[dict], radius_m: float = 40.0, 
         "false_positives": [kept[i] for i in fps],
         "missed": [truth[i] for i in missed],
     }
+
+
+def threshold_sweep(positives: list[float], negatives: list[float]) -> dict:
+    """Seuils de vraisemblance de déchets : positives = photos de dépotoirs, negatives = autres photos."""
+    if not positives or not negatives:
+        return {"error": "il faut des photos des deux classes"}
+    cuts = sorted({0.0, *positives, *negatives})
+    rows = []
+    for t in cuts:
+        tp = sum(1 for v in positives if v >= t)
+        fn = len(positives) - tp
+        fp = sum(1 for v in negatives if v >= t)
+        tn = len(negatives) - fp
+        prec = tp / (tp + fp) if tp + fp else None
+        rec = tp / len(positives)
+        f1 = 2 * prec * rec / (prec + rec) if prec and rec else 0.0
+        rows.append({"threshold": round(t, 3), "tp": tp, "fn": fn, "fp": fp, "tn": tn, "precision": None if prec is None else round(prec, 3), "recall": round(rec, 3), "f1": round(f1, 3)})
+    best_f1 = max(rows, key=lambda r: (r["f1"], r["threshold"]))
+    safe = [r for r in rows if r["recall"] >= 0.95]
+    safest = max(safe, key=lambda r: r["threshold"]) if safe else None
+    return {"results": rows, "best_f1": best_f1, "keep_95_percent_of_dumps": safest}

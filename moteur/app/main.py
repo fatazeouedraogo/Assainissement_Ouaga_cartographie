@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import json
 
-from . import __version__, assistant, catalog, decision, evaluation, photo, predict, satellite, scenarios
+from . import __version__, assistant, catalog, decision, evaluation, learning, photo, precollectors, predict, satellite, scenarios
 from .priority import score_dumps
 from .routing import HAS_ORTOOLS
 from .schemas import (
@@ -15,6 +15,7 @@ from .schemas import (
     CalibrateRequest,
     CompareRequest,
     EvaluateRequest,
+    LearnRequest,
     MaskSet,
     MergeRequest,
     ParetoRequest,
@@ -29,7 +30,17 @@ from .schemas import (
 MAX_PHOTO_BYTES = 8 * 1024 * 1024
 MAX_HOUSEHOLDS = 60000
 
-app = FastAPI(title="Moteur Ouaga Assainissement", version=__version__)
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    if os.environ.get("USE_CLIP") == "1":
+        photo.clip_status()
+    yield
+
+
+app = FastAPI(title="Moteur Ouaga Assainissement", version=__version__, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
 
 
@@ -46,7 +57,7 @@ def _guard(n: int):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": __version__, "ortools": HAS_ORTOOLS, "clip": os.environ.get("USE_CLIP") == "1"}
+    return {"status": "ok", "version": __version__, "ortools": HAS_ORTOOLS, "clip": photo.clip_status()}
 
 
 @app.get("/v1/controls", dependencies=[Depends(require_key)])
@@ -168,3 +179,17 @@ def satellite_merge(req: MergeRequest):
 @app.post("/v1/satellite/evaluate", dependencies=[Depends(require_key)])
 def satellite_evaluate(req: EvaluateRequest):
     return evaluation.evaluate(req.candidates, [t.model_dump() for t in req.truth], req.radius_m, req.thresholds)
+
+
+@app.post("/v1/learn/respond", dependencies=[Depends(require_key)])
+def learn_respond(req: LearnRequest):
+    _guard(len(req.households))
+    return learning.learn(req)
+
+
+@app.post("/v1/precollectors", dependencies=[Depends(require_key)])
+def precollectors_plan(req: PlanRequest):
+    _guard(len(req.households))
+    params, hh, _ = scenarios.apply_events(req.params, req.households, req.events)
+    center = (req.center.lat, req.center.lon) if req.center else None
+    return precollectors.precollector_plans(hh, params, center)

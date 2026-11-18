@@ -28,6 +28,7 @@ class Model:
         self.pt_index = {pid: i for i, pid in enumerate(self.pt_ids)}
         self.pt_xy = self.proj.forward([p["lat"] for p in pts], [p["lon"] for p in pts])
         self.pt_cap = np.array([p["capacity_kg"] for p in pts], dtype=float)
+        self.pt_fill0 = np.array([p.get("sensor_fill", 0.0) for p in pts], dtype=float) * self.pt_cap
         d = pairwise_m(self.hh_xy, self.pt_xy)
         self.pn = d.argmin(1)
         self.dn = d[np.arange(len(w)), self.pn].astype(float)
@@ -95,7 +96,7 @@ class Model:
         share = self.pt_hh / max(self.pt_hh.sum(), 1e-9)
         pc_cap = share * p.precollectors * p.precollector_capacity_kg
 
-        fill = np.zeros(npts)
+        fill = self.pt_fill0.copy()
         dump_kg = np.zeros(self.n_slots)
         dump_kg[: len(self.init_dump_kg)] = self.init_dump_kg
         broken: dict[str, int] = {}

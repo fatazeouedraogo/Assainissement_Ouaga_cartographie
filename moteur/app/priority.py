@@ -73,5 +73,4 @@ def score_dumps(dumps: list[Dump], pois: list[Poi], rain: bool = False) -> list[
                 "rain_weighting": rain,
             }
         )
-        
     return out

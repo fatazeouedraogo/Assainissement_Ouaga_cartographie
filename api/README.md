@@ -65,9 +65,15 @@ La confiance d'un dépotoir combine les crédibilités des auteurs distincts (pr
 | POST | `/api/insights/report.pdf` | vérificateur, admin : note de décision d'une page |
 | GET/POST | `/api/notifications`, `/read` | connecté : notifications d'avancement aux auteurs |
 | POST/GET | `/api/iot/sensors`, `/readings`, `/status` | capteurs de remplissage (ESP32, voir `iot/`) |
-| POST/GET | `/api/candidates/scan`, `/` | candidats repérés sur image aérienne, à vérifier au sol |
+| POST/GET | `/api/candidates/scan`, `/`, `/stats` | candidats repérés sur image aérienne (masques OSM optionnels), liste, précision mesurée sur le terrain |
+| POST | `/api/candidates/:id/confirm`, `/dismiss` | vérificateur, admin : confirmer (crée un dépotoir vérifié) ou rejeter avec un motif obligatoire |
+| PUT | `/api/settings/detection` | admin : seuil minimal, distance de fusion, poids du risque |
 | GET/POST | `/api/subscriptions/price`, `/pay`, `/mine` | abonnement avec paiement Orange/Moov **simulé** |
 | GET/POST | `/api/whatsapp/webhook` | signalement par WhatsApp : position, puis photo |
+| POST | `/api/insights/learn` | vérificateur, admin : apprentissage persistant de la meilleure réponse à un aléa |
+| POST | `/api/insights/precollectors` | vérificateur, admin : itinéraires et revenus des pré-collecteurs |
+| POST/GET | `/api/insights/observations` | admin : chiffres observés de la mairie, utilisés pour caler la simulation |
+| GET | `/api/public/dumps.csv`, `/datapackage.json` | données ouvertes (ODbL) ; `/dumps.osm` (admin) pour JOSM |
 | GET | `/` | tableau de bord public (page web, sans connexion) |
 
 `client_id` est un UUID généré par le mobile : rejouer un envoi hors ligne ne crée jamais de doublon.
@@ -87,3 +93,27 @@ Le garage et la décharge sont des **valeurs provisoires** (`placeholder`). Chaq
 - **Abonnement** : le paiement Orange/Moov est une **simulation** (référence `SIM-…`). Il faut un contrat avec un opérateur pour de vrais paiements.
 - **Autre commune** : démarrer avec `COMMUNE_BBOX=sud,ouest,nord,est` et utiliser `scripts/kit_commune.py` du moteur.
 - **Licence** : MIT pour le code. Les données OpenStreetMap restent sous ODbL (voir `DONNEES.md`).
+
+## Validation des candidats satellite
+
+1. L'admin envoie une image et son emprise à `POST /api/candidates/scan` (champ `masks` facultatif : sortie de `scripts/fetch_osm_masks.py` du moteur). Les candidats trop proches d'un dépotoir ou d'un candidat existant sont ignorés.
+2. Le vérificateur va sur place : **confirmer** crée un dépotoir déjà vérifié (la visite terrain vaut vérification), **rejeter** exige un motif (bâtiment, route, eau, végétation, rien d'anormal, déjà signalé, autre).
+3. `GET /api/candidates/stats` donne la précision réelle (confirmés / vérifiés), les motifs de fausses alertes, la précision par seuil et un seuil conseillé (précision d'au moins 70 % sur au moins 5 candidats). Sous 10 candidats vérifiés, la réponse avertit que le chiffre est peu fiable.
+4. L'admin règle le seuil avec `PUT /api/settings/detection`.
+
+## Ajouts récents
+
+- Les dernières lectures de capteurs (moins de 24 h) sont envoyées au plan : les conteneurs pleins à 80 % ou plus deviennent prioritaires.
+- `POST /api/insights/calibrate` sans `target` reprend la dernière observation enregistrée de la mairie.
+- Garage et décharge : le lien Google Maps fourni par l'équipe (12.328877, -1.458722) est enregistré comme décharge, **à confirmer** ; le second point (12.325206, -1.459381) est dans le réglage `sites`. `PUT /api/settings/depot` et `/landfill` les fixent.
+- Verser la carte dans OpenStreetMap : voir `docs/contribuer-osm.md`.
+- Intégration continue : `.github/workflows/ci.yml`.
+
+## Importer les vrais bâtiments
+
+```bash
+node scripts/import-buildings.js --csv open_buildings_ouaga.csv --phone +22670000001 --password demo-2026 \
+  --api http://localhost:3000 --bbox 12.25,-1.70,12.50,-1.35 --min-confidence 0.7
+```
+
+Le fichier doit avoir des colonnes `latitude` et `longitude` (format Open Buildings : une colonne `confidence` est lue si elle existe). Compte administrateur requis. Les bâtiments synthétiques de la démonstration restent dans la base avec `source = 'synthetic'` : supprimez-les avec `DELETE FROM buildings WHERE source = 'synthetic'`.

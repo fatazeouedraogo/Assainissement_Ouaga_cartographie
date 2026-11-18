@@ -292,3 +292,40 @@ test('candidats satellite : analyse, validation terrain, statistiques, seuil', a
   const bad = await api('PUT', '/api/settings/detection', { token: tokens.adm, json: { min_score: -1, merge_m: 30, risk_weight: 0.5 } });
   assert.equal(bad.status, 422);
 });
+
+test('exports ouverts : CSV, JOSM, datapackage', async () => {
+  const csv = await (await fetch(`${base}/api/public/dumps.csv`)).text();
+  assert.match(csv.split('\n')[0], /^id,lat,lon,status/);
+  assert.ok(csv.split('\n').length > 1);
+  const osm = await fetch(`${base}/api/public/dumps.osm`, { headers: { Authorization: `Bearer ${tokens.adm}` } });
+  assert.equal(osm.status, 200);
+  assert.match(await osm.text(), /<osm version="0.6"[\s\S]*waste_dump_site/);
+  assert.equal((await fetch(`${base}/api/public/dumps.osm`)).status, 401);
+  const dp = await (await fetch(`${base}/api/public/datapackage.json`)).json();
+  assert.equal(dp.licenses[0].name, 'ODbL-1.0');
+});
+
+test('observations, calibration sur observation, apprentissage persistant, pré-collecteurs', async (t) => {
+  const obs = await api('POST', '/api/insights/observations', { token: tokens.adm, json: { metric: 'collection_rate', value: 0.6, note: 'chiffre mairie (test)' } });
+  assert.equal(obs.status, 201);
+  assert.equal((await api('POST', '/api/insights/observations', { token: tokens.c1, json: { metric: 'collection_rate', value: 0.6 } })).status, 403);
+  const cal = await api('POST', '/api/insights/calibrate', { token: tokens.adm, json: { metric: 'collection_rate', parameter: 'subscription_rate', low: 0.05, high: 0.95, params: { trucks: 1, precollectors: 30 } } });
+  if (cal.status === 503) return t.skip('moteur indisponible');
+  assert.equal(cal.status, 200);
+  assert.equal(cal.body.target, 0.6);
+
+  const body = { params: { trucks: 3 }, events: [{ kind: 'truck_breakdown', value: 1 }], episodes: 20 };
+  const l1 = await api('POST', '/api/insights/learn', { token: tokens.adm, json: body });
+  assert.equal(l1.status, 200);
+  const l2 = await api('POST', '/api/insights/learn', { token: tokens.adm, json: body });
+  const total = (r) => r.body.policy.reduce((a, p) => a + p.pulls, 0);
+  assert.ok(total(l2) > total(l1));
+  const rows = await query('SELECT count(*)::int AS n FROM rl_state WHERE context = $1', [l1.body.context]);
+  assert.ok(rows.rows[0].n >= 5);
+
+  const pc = await api('POST', '/api/insights/precollectors', { token: tokens.adm, json: { params: { precollectors: 5 } } });
+  assert.equal(pc.status, 200);
+  assert.ok(pc.body.precollectors.length > 0 && pc.body.precollectors[0].revenue_month > 0);
+  const plan = await api('POST', '/api/plan', { token: tokens.adm, json: { params: { replications: 3 }, time_limit_s: 2 } });
+  assert.ok('urgent_points' in plan.body.plan.metrics);
+});

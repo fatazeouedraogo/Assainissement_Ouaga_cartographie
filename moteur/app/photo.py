@@ -7,6 +7,9 @@ import numpy as np
 from PIL import Image, ImageOps
 
 _CLIP = None
+CLIP_MIN_WASTE = float(os.environ.get("CLIP_MIN_WASTE", "0.35"))
+WASTE_KEYS = ("garbage", "rubble", "plastic", "organic")
+WASTE_TYPES = {"garbage": "household", "rubble": "rubble", "plastic": "plastic", "organic": "organic"}
 LABELS = {
     "garbage": "a pile of garbage dumped on the ground outdoors",
     "rubble": "a heap of construction rubble and debris",
@@ -17,6 +20,23 @@ LABELS = {
     "indoor": "an indoor room",
     "landscape": "a landscape, sky or vegetation",
 }
+
+
+def clip_status() -> str:
+    if os.environ.get("USE_CLIP") != "1":
+        return "disabled"
+    return "ready" if _load_clip() else "error"
+
+
+def interpret_clip(scores: dict, min_waste: float | None = None) -> dict:
+    threshold = CLIP_MIN_WASTE if min_waste is None else min_waste
+    waste_prob = sum(scores[k] for k in WASTE_KEYS)
+    kind = max(WASTE_KEYS, key=lambda k: scores[k])
+    return {
+        "waste_likelihood": round(waste_prob, 3),
+        "waste_type": WASTE_TYPES[kind],
+        "not_a_dump": waste_prob < threshold,
+    }
 
 
 def _load_clip():
@@ -30,7 +50,8 @@ def _load_clip():
         from transformers import CLIPModel, CLIPProcessor
 
         name = os.environ.get("CLIP_MODEL", "openai/clip-vit-base-patch32")
-        _CLIP = (CLIPModel.from_pretrained(name).eval(), CLIPProcessor.from_pretrained(name))
+        offline = os.environ.get("CLIP_OFFLINE") == "1"
+        _CLIP = (CLIPModel.from_pretrained(name, local_files_only=offline).eval(), CLIPProcessor.from_pretrained(name, local_files_only=offline))
     except Exception:
         _CLIP = False
         return None
@@ -112,19 +133,17 @@ def analyze(data: bytes) -> dict:
         with torch.no_grad():
             probs = model(**inputs).logits_per_image.softmax(dim=1)[0].tolist()
         scores = dict(zip(LABELS.keys(), probs))
-        waste_keys = ("garbage", "rubble", "plastic", "organic")
-        waste_prob = sum(scores[k] for k in waste_keys)
-        kind = max(waste_keys, key=lambda k: scores[k])
+        verdict = interpret_clip(scores)
         result.update(
             {
                 "method": "clip",
                 "reliable": True,
-                "waste_likelihood": round(waste_prob, 3),
-                "waste_type": {"garbage": "household", "rubble": "rubble", "plastic": "plastic", "organic": "organic"}[kind],
+                "waste_likelihood": verdict["waste_likelihood"],
+                "waste_type": verdict["waste_type"],
                 "scores": {k: round(v, 3) for k, v in scores.items()},
             }
         )
-        if waste_prob < 0.35:
+        if verdict["not_a_dump"]:
             result["flags"].append("not_a_dump")
     else:
         result.update(

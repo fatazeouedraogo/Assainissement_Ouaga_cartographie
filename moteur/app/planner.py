@@ -55,6 +55,20 @@ def build_plan(req: PlanRequest, params: Params, households, force_heuristic: bo
     full, source = road_matrix_m(coords, params.detour_factor)
     GARAGE, LANDFILL = 0, 1
 
+    urgent_nodes: dict[int, float] = {}
+    if req.sensors:
+        s_xy = pl.proj.forward([s.lat for s in req.sensors], [s.lon for s in req.sensors])
+        p_xy0 = pl.proj.forward([p["lat"] for p in pts], [p["lon"] for p in pts])
+        for si, s in enumerate(req.sensors):
+            d = np.sqrt(((p_xy0 - s_xy[si]) ** 2).sum(1))
+            j = int(d.argmin())
+            if d[j] <= 60.0:
+                pts[j]["sensor_fill"] = max(pts[j].get("sensor_fill", 0.0), float(s.fill_ratio))
+        for j, p in enumerate(pts):
+            p["urgent"] = bool(p.get("sensor_fill", 0.0) >= 0.8)
+            if p["urgent"]:
+                urgent_nodes[2 + j] = float(p["sensor_fill"])
+
     demand_visit = {2 + i: pts[i]["demand_kg_day"] * params.frequency_days for i in range(n)}
     pts_xy = pl.proj.forward([p["lat"] for p in pts], [p["lon"] for p in pts])
     garage_xy = pl.proj.forward([req.depot.lat], [req.depot.lon])[0]
@@ -117,7 +131,8 @@ def build_plan(req: PlanRequest, params: Params, households, force_heuristic: bo
         if hub is not None:
             dem[pos[2 + hub]] += extra_hub_kg
         svc = {pos[2 + i]: service_s[2 + i] for i in truck_here}
-        truck_routes_raw, dropped_raw = solve_stage(sub, cust, dem, vehicles, svc, per_group_limit, force_heuristic)
+        prio = {pos[n]: v for n, v in urgent_nodes.items() if n in pos}
+        truck_routes_raw, dropped_raw = solve_stage(sub, cust, dem, vehicles, svc, per_group_limit, force_heuristic, prio)
         truck_routes = [
             {
                 "vehicle": r.vehicle.label,
@@ -181,6 +196,7 @@ def build_plan(req: PlanRequest, params: Params, households, force_heuristic: bo
             else 0.0,
             "subscription_break_even_month": round(break_even, 0),
             "subscription_affordability": round(break_even / params.household_income_month, 4),
+            "urgent_points": sum(1 for p in pts if p.get("urgent")),
             "unserved_points": len(unserved_ids),
             "unserved_ids": unserved_ids,
             "served_share_kg": round(served_demand / total_demand, 4),

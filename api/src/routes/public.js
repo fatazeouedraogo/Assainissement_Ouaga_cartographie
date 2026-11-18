@@ -33,6 +33,43 @@ r.get('/dumps.geojson', wrap(async (_req, res) => {
   });
 }));
 
+const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const OPEN = "status IN ('verified','scheduled','cleaned')";
+
+r.get('/dumps.csv', wrap(async (_req, res) => {
+  const { rows } = await query(`SELECT id, ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lon, status, size, waste_type, est_kg, first_reported_at, cleaned_at FROM dumps WHERE ${OPEN} ORDER BY first_reported_at`);
+  const head = 'id,lat,lon,status,size,waste_type,est_kg,first_reported_at,cleaned_at';
+  const body = rows.map((d) => [d.id, d.lat, d.lon, d.status, d.size, d.waste_type, d.est_kg, d.first_reported_at?.toISOString?.() ?? '', d.cleaned_at?.toISOString?.() ?? ''].join(','));
+  res.type('text/csv').send([head, ...body].join('\n'));
+}));
+
+r.get('/dumps.osm', requireAuth, requireRole('admin'), wrap(async (_req, res) => {
+  const { rows } = await query("SELECT id, ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lon, size, waste_type, est_kg FROM dumps WHERE status IN ('verified','scheduled')");
+  const nodes = rows.map((d, i) => `  <node id="-${i + 1}" action="modify" visible="true" lat="${d.lat}" lon="${d.lon}">\n    <tag k="amenity" v="waste_dump_site"/>\n    <tag k="source" v="signalements citoyens vérifiés (Ouaga Propre)"/>\n    <tag k="note" v="${esc(`Dépotoir sauvage, taille ${d.size}, environ ${Math.round(d.est_kg)} kg`)}"/>\n    <tag k="fixme" v="vérifier le balisage avant import ; id ${d.id.slice(0, 8)}"/>\n  </node>`);
+  res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6" generator="ouaga-propre">\n${nodes.join('\n')}\n</osm>\n`);
+}));
+
+r.get('/datapackage.json', wrap(async (_req, res) => {
+  const n = (await query(`SELECT count(*)::int AS n FROM dumps WHERE ${OPEN}`)).rows[0].n;
+  res.json({
+    name: 'depotoirs-ouagadougou',
+    title: 'Dépotoirs sauvages vérifiés de Ouagadougou',
+    description: 'Dépotoirs signalés par les habitants et vérifiés sur le terrain. Coordonnées WGS84.',
+    licenses: [{ name: 'ODbL-1.0', path: 'https://opendatacommons.org/licenses/odbl/1-0/', title: 'Open Database License' }],
+    attribution: 'Signalements citoyens vérifiés (Ouaga Propre). Fond de carte : © contributeurs OpenStreetMap.',
+    generated_at: new Date().toISOString(),
+    resources: [
+      { name: 'depotoirs', path: '/api/public/dumps.csv', format: 'csv', mediatype: 'text/csv', rows: n },
+      { name: 'depotoirs-geojson', path: '/api/public/dumps.geojson', format: 'geojson', mediatype: 'application/geo+json', rows: n },
+    ],
+    fields: [
+      { name: 'status', description: 'verified, scheduled ou cleaned' },
+      { name: 'size', description: 'small, medium ou large' },
+      { name: 'est_kg', description: 'masse estimée en kg (indicative)' },
+    ],
+  });
+}));
+
 r.get('/maproulette.ndjson', requireAuth, requireRole('admin'), wrap(async (_req, res) => {
   const { rows } = await query(
     `SELECT id, ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lon, size, waste_type

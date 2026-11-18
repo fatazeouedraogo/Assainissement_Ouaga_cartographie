@@ -103,7 +103,7 @@ def solve_heuristic(dist, customers, demands, vehicles, service_s):
     return routes, sorted(remaining)
 
 
-def solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s):
+def solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s, priority=None):
     n = dist.shape[0]
     starts = [v.start for v in vehicles]
     ends = [v.end for v in vehicles]
@@ -151,7 +151,7 @@ def solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s):
     routing.AddDimensionWithVehicleCapacity(dcb, 0, [int(v.capacity_kg) for v in vehicles], True, "Load")
 
     for c in customers:
-        pen = int(DROP_PENALTY + demands.get(c, 0.0) * 2000)
+        pen = int(DROP_PENALTY * (1.0 + 3.0 * (priority or {}).get(c, 0.0)) + demands.get(c, 0.0) * 2000)
         routing.AddDisjunction([manager.NodeToIndex(c)], pen)
 
     params = pywrapcp.DefaultRoutingSearchParameters()
@@ -182,11 +182,11 @@ def solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s):
     return routes, dropped
 
 
-def solve_stage(dist, customers, demands, vehicles, service_s, time_limit_s, force_heuristic=False):
+def solve_stage(dist, customers, demands, vehicles, service_s, time_limit_s, force_heuristic=False, priority=None):
     if not customers or not vehicles:
         return [], sorted(customers)
     if HAS_ORTOOLS and not force_heuristic:
-        return solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s)
+        return solve_ortools(dist, customers, demands, vehicles, service_s, time_limit_s, priority)
     return solve_heuristic(dist, customers, demands, vehicles, service_s)
 
 

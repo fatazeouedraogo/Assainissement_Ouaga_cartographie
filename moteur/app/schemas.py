@@ -85,6 +85,8 @@ class Params(BaseModel):
     plastic_price_kg: float = Field(default=100.0, ge=0)
     precollector_income_month: float = Field(default=60000.0, ge=0)
     household_income_month: float = Field(default=120000.0, gt=0)
+    subscription_price_month: float = Field(default=1500.0, ge=0)
+    precollector_speed_kmh: float = Field(default=5.0, gt=0)
     exposure_radius_m: float = Field(default=150.0, ge=20, le=1000)
 
     horizon_days: int = Field(default=30, ge=1, le=365)
@@ -104,6 +106,10 @@ class Event(BaseModel):
     label: str | None = None
 
 
+class SensorReading(GeoPoint):
+    fill_ratio: float = Field(ge=0, le=1)
+
+
 class PlanRequest(BaseModel):
     households: list[Household] = Field(min_length=1)
     dumps: list[Dump] = []
@@ -112,6 +118,7 @@ class PlanRequest(BaseModel):
     params: Params = Params()
     events: list[Event] = []
     center: GeoPoint | None = None
+    sensors: list[SensorReading] = []
     time_limit_s: int = Field(default=5, ge=1, le=60)
 
 
@@ -199,3 +206,9 @@ class EvaluateRequest(BaseModel):
     truth: list[GeoPoint] = Field(min_length=1)
     radius_m: float = Field(default=40.0, ge=5, le=300)
     thresholds: list[float] | None = None
+
+
+class LearnRequest(PlanRequest):
+    episodes: int = Field(default=60, ge=10, le=400)
+    prior: dict[str, dict] = {}
+    arms: list[str] | None = None
