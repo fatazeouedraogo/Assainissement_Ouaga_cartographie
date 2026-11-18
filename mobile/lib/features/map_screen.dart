@@ -3,207 +3,435 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../core/api.dart';
 import '../core/models.dart';
-import '../core/motif.dart';
-import '../core/state.dart';
+import '../core/session.dart';
 import '../core/theme.dart';
+import '../widgets/common.dart';
+import 'candidate_sheet.dart';
 import 'dump_sheet.dart';
 
-Color statusColor(String s) => switch (s) {
-      'pending' => Pal.pending,
-      'verified' => Pal.dump,
-      'scheduled' => Pal.planned,
-      'cleaned' => Pal.cleaned,
-      _ => Pal.inkSoft,
-    };
-
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key});
+  const MapScreen({super.key, required this.active});
+  final bool active;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends State<MapScreen> {
-  final _ctrl = MapController();
-  final Set<String> _filter = {'pending', 'verified', 'scheduled'};
+  static const _ouaga = LatLng(12.3714, -1.5197);
+  final _map = MapController();
+  List<Dump> _dumps = [];
+  List<Candidate> _cands = [];
+  bool _loading = true;
+  String? _error;
+  String _filter = 'todo';
+  bool _showCands = false;
   LatLng? _me;
-  bool _risk = false, _cand = false, _sens = false;
-  List<dynamic> _riskCells = [], _cands = [], _sensors = [];
+  DateTime? _lastSync;
 
-  Future<void> _toggle(String which, bool on) async {
-    final api = context.read<AppState>().api;
-    setState(() {
-      if (which == 'risk') _risk = on;
-      if (which == 'cand') _cand = on;
-      if (which == 'sens') _sens = on;
+  static const _filters = {
+    'todo': 'À traiter',
+    'scheduled': 'Programmés',
+    'cleaned': 'Nettoyés',
+    'pending': 'En attente',
+    'all': 'Tous',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    context.read<Session>().focus.addListener(_onFocus);
+    _load();
+    _onFocus();
+  }
+
+  @override
+  void dispose() {
+    context.read<Session>().focus.removeListener(_onFocus);
+    super.dispose();
+  }
+
+  void _onFocus() {
+    final f = context.read<Session>().focus.value;
+    if (f == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        _map.move(LatLng(f[0], f[1]), 18);
+      } catch (_) {}
     });
-    if (!on) return;
+  }
+
+  int _count(String k) => _dumps
+      .where(
+        (d) => switch (k) {
+          'todo' => d.status == 'verified' || d.status == 'scheduled',
+          'all' => d.status != 'rejected',
+          _ => d.status == k,
+        },
+      )
+      .length;
+
+  @override
+  void didUpdateWidget(MapScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.active && !old.active) _load();
+  }
+
+  Future<void> _load() async {
+    final s = context.read<Session>();
+    setState(() {
+      _loading = _dumps.isEmpty;
+      _error = null;
+    });
     try {
-      if (which == 'risk') {
-        final j = await api.get('/api/insights/risk');
-        if (mounted) setState(() => _riskCells = j['cells'] as List);
-      } else if (which == 'cand') {
-        final j = await api.get('/api/candidates');
-        if (mounted) setState(() => _cands = j['candidates'] as List);
-      } else {
-        final j = await api.get('/api/iot/status');
-        if (mounted) setState(() => _sensors = j['sensors'] as List);
+      final j = await s.api.get('/api/dumps', query: {'limit': '2000'}) as Map;
+      final list = [
+        for (final f in (j['features'] as List)) Dump.fromFeature(Map<String, dynamic>.from(f as Map)),
+      ];
+      var cands = <Candidate>[];
+      if (s.isStaff) {
+        try {
+          final cj = await s.api.get('/api/candidates') as Map;
+          cands = [
+            for (final c in (cj['candidates'] as List))
+              Candidate.fromJson(Map<String, dynamic>.from(c as Map)),
+          ];
+        } on ApiException {
+          cands = [];
+        }
       }
-    } catch (_) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Couche indisponible pour le moment')));
+      if (mounted) {
+        setState(() {
+          _dumps = list;
+          _cands = cands;
+          _lastSync = DateTime.now();
+        });
+      }
+    } on ApiException catch (e) {
+      if (e.unauthorized) await s.logout();
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  static const _filters = {
-    'pending': 'À vérifier',
-    'verified': 'Vérifiés',
-    'scheduled': 'Programmés',
-    'cleaned': 'Nettoyés',
-  };
+  List<Dump> get _visible => _dumps.where((d) {
+    switch (_filter) {
+      case 'todo':
+        return d.status == 'verified' || d.status == 'scheduled';
+      case 'all':
+        return d.status != 'rejected';
+      default:
+        return d.status == _filter;
+    }
+  }).toList();
 
   Future<void> _locate() async {
-    final messenger = ScaffoldMessenger.of(context);
-    if (!await Geolocator.isLocationServiceEnabled()) {
-      messenger.showSnackBar(const SnackBar(content: Text('Activez la localisation du téléphone')));
-      return;
-    }
-    var perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
-    if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
-      messenger.showSnackBar(const SnackBar(content: Text('Autorisez la localisation pour vous situer')));
-      return;
-    }
     try {
-      final p = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 12)));
-      final here = LatLng(p.latitude, p.longitude);
-      setState(() => _me = here);
-      _ctrl.move(here, 16);
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
+      final p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 15),
+        ),
+      );
+      final ll = LatLng(p.latitude, p.longitude);
+      setState(() => _me = ll);
+      _map.move(ll, 16);
     } catch (_) {
-      messenger.showSnackBar(const SnackBar(content: Text('Position introuvable pour le moment')));
+      if (mounted) toast(context, 'Position introuvable.', error: true);
     }
+  }
+
+  Future<void> _openDump(Dump d) async {
+    if (await showDumpSheet(context, d)) _load();
+  }
+
+  Future<void> _openCand(Candidate c) async {
+    if (await showCandidateSheet(context, c)) _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final s = context.watch<AppState>();
-    final shown = s.dumps.where((d) => _filter.contains(d.status)).toList();
-    return Stack(children: [
-      FlutterMap(
-        mapController: _ctrl,
-        options: const MapOptions(initialCenter: LatLng(12.3714, -1.5197), initialZoom: 12.6, minZoom: 9, maxZoom: 19),
-        children: [
-          TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'bf.ouaga.assainissement'),
-          if (_risk)
-            CircleLayer(circles: [
-              for (final c in _riskCells)
-                CircleMarker(point: LatLng((c['lat'] as num).toDouble(), (c['lon'] as num).toDouble()), radius: (c['radius_m'] as num).toDouble(), useRadiusInMeter: true, color: Pal.dump.withValues(alpha: 0.10 + 0.35 * (c['risk'] as num).toDouble() / 100), borderColor: Pal.dump, borderStrokeWidth: 1),
-            ]),
-          if (_cand)
-            CircleLayer(circles: [
-              for (final c in _cands)
-                CircleMarker(point: LatLng((c['lat'] as num).toDouble(), (c['lon'] as num).toDouble()), radius: 40, useRadiusInMeter: true, color: Colors.transparent, borderColor: Pal.planned, borderStrokeWidth: 2),
-            ]),
-          MarkerLayer(
-            markers: [
-              if (_sens)
-                for (final c in _sensors)
+    final s = context.watch<Session>();
+    if (_error != null && _dumps.isEmpty) return ErrorState(_error!, _load);
+    final dumps = _visible;
+    final stack = Stack(
+      children: [
+        FlutterMap(
+          mapController: _map,
+          options: const MapOptions(initialCenter: _ouaga, initialZoom: 12.5, minZoom: 9, maxZoom: 19),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'bf.ouagaclean.app',
+            ),
+            MarkerLayer(
+              markers: [
+                for (final d in dumps)
                   Marker(
-                    point: LatLng((c['lat'] as num).toDouble(), (c['lon'] as num).toDouble()),
-                    width: 30,
-                    height: 30,
-                    child: Container(
-                      decoration: BoxDecoration(color: c['urgent'] == true ? Pal.dump : Pal.cleaned, shape: BoxShape.rectangle, borderRadius: BorderRadius.circular(4), border: Border.all(color: Pal.ink, width: 1.6)),
-                      child: const Icon(Icons.delete_outline, size: 18, color: Colors.white),
-                    ),
-                  ),
-              for (final d in shown)
-                Marker(
-                  point: d.pos,
-                  width: 46,
-                  height: 46,
-                  child: GestureDetector(
-                    onTap: () => showDumpSheet(context, d),
-                    child: MoundGlyph(level: d.sizeLevel, color: statusColor(d.status), size: 40 + d.priority / 12, ring: d.recurrence),
-                  ),
-                ),
-              if (_me != null)
-                Marker(
-                  point: _me!,
-                  width: 26,
-                  height: 26,
-                  child: Container(decoration: BoxDecoration(color: Pal.signal, shape: BoxShape.circle, border: Border.all(color: Pal.ink, width: 3))),
-                ),
-            ],
-          ),
-          const RichAttributionWidget(attributions: [TextSourceAttribution('© contributeurs OpenStreetMap')]),
-        ],
-      ),
-      Positioned(
-        top: 10,
-        left: 10,
-        right: 10,
-        child: SafeArea(
-          child: Plate(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: Row(children: [
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(children: [
-                    FilterChip(label: const Text('Risque'), showCheckmark: false, selected: _risk, labelStyle: TextStyle(fontWeight: FontWeight.w700, color: _risk ? Pal.surface : Pal.ink), onSelected: (v) => _toggle('risk', v)),
-                    const SizedBox(width: 6),
-                    if (s.user!.isStaff) ...[
-                      FilterChip(label: const Text('Candidats'), showCheckmark: false, selected: _cand, labelStyle: TextStyle(fontWeight: FontWeight.w700, color: _cand ? Pal.surface : Pal.ink), onSelected: (v) => _toggle('cand', v)),
-                      const SizedBox(width: 6),
-                      FilterChip(label: const Text('Capteurs'), showCheckmark: false, selected: _sens, labelStyle: TextStyle(fontWeight: FontWeight.w700, color: _sens ? Pal.surface : Pal.ink), onSelected: (v) => _toggle('sens', v)),
-                      const SizedBox(width: 10),
-                    ],
-                    for (final e in _filters.entries)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: FilterChip(
-                          showCheckmark: false,
-                          avatar: CircleAvatar(radius: 5, backgroundColor: statusColor(e.key)),
-                          label: Text(e.value),
-                          labelStyle: TextStyle(fontWeight: FontWeight.w700, color: _filter.contains(e.key) ? Pal.surface : Pal.ink),
-                          selected: _filter.contains(e.key),
-                          onSelected: (v) => setState(() => v ? _filter.add(e.key) : _filter.remove(e.key)),
+                    point: LatLng(d.lat, d.lon),
+                    width: 34,
+                    height: 34,
+                    child: GestureDetector(
+                      onTap: () => _openDump(d),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: statusColor(d.status),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: d.size == 'large' ? 3 : 2),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.25),
+                              blurRadius: 6,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          d.status == 'cleaned' ? Icons.check : Icons.delete_outline,
+                          color: Colors.white,
+                          size: d.size == 'large' ? 19 : 16,
                         ),
                       ),
-                  ]),
-                ),
-              ),
-              IconButton(
-                tooltip: 'Actualiser',
-                onPressed: s.loadingDumps ? null : s.refreshDumps,
-                icon: s.loadingDumps ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Pal.ink)) : const Icon(Icons.refresh),
-              ),
-            ]),
+                    ),
+                  ),
+                if (s.isStaff && _showCands)
+                  for (final c in _cands)
+                    Marker(
+                      point: LatLng(c.lat, c.lon),
+                      width: 30,
+                      height: 30,
+                      child: GestureDetector(
+                        onTap: () => _openCand(c),
+                        child: Transform.rotate(
+                          angle: 0.785,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Pal.secondary,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: Transform.rotate(
+                              angle: -0.785,
+                              child: const Icon(Icons.satellite_alt, color: Colors.white, size: 15),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                if (_me != null)
+                  Marker(
+                    point: _me!,
+                    width: 22,
+                    height: 22,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Pal.secondary,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 3),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+        Positioned(
+          top: 10,
+          left: 0,
+          right: 0,
+          child: SizedBox(
+            height: 40,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              children: [
+                for (final e in _filters.entries)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text('${e.value} (${_count(e.key)})'),
+                      selected: _filter == e.key,
+                      onSelected: (_) => setState(() => _filter = e.key),
+                      selectedColor: Pal.primary,
+                      backgroundColor: Colors.white,
+                      showCheckmark: false,
+                      side: BorderSide(color: _filter == e.key ? Pal.primary : Pal.line),
+                      labelStyle: body(13, w: FontWeight.w700, c: _filter == e.key ? Colors.white : Pal.ink),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(99)),
+                    ),
+                  ),
+                if (s.isStaff)
+                  FilterChip(
+                    label: Text('Satellite${_cands.isEmpty ? '' : ' (${_cands.length})'}'),
+                    avatar: const Icon(Icons.satellite_alt, size: 16),
+                    selected: _showCands,
+                    onSelected: (v) => setState(() => _showCands = v),
+                    selectedColor: Pal.secondaryFixed,
+                    backgroundColor: Colors.white,
+                    showCheckmark: false,
+                    side: BorderSide(color: _showCands ? Pal.secondary : Pal.line),
+                    labelStyle: body(13, w: FontWeight.w700, c: _showCands ? Pal.secondary : Pal.ink),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(99)),
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
-      if (s.dumpError != null)
         Positioned(
-          top: 84,
-          left: 10,
-          right: 10,
-          child: SafeArea(child: Plate(color: Pal.signal, padding: const EdgeInsets.all(10), child: Text(s.dumpError!, style: const TextStyle(fontWeight: FontWeight.w700)))),
+          right: 14,
+          bottom: 26,
+          child: Column(
+            children: [
+              FloatingActionButton.small(
+                heroTag: 'refresh',
+                onPressed: _load,
+                backgroundColor: Colors.white,
+                foregroundColor: Pal.ink,
+                child: _loading
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.refresh),
+              ),
+              const SizedBox(height: 10),
+              FloatingActionButton(
+                heroTag: 'me',
+                onPressed: _locate,
+                backgroundColor: Pal.primary,
+                foregroundColor: Colors.white,
+                child: const Icon(Icons.my_location),
+              ),
+            ],
+          ),
         ),
-      Positioned(
-        left: 14,
-        bottom: 18,
-        child: FloatingActionButton.small(
-          heroTag: 'locate',
-          backgroundColor: Pal.surface,
-          foregroundColor: Pal.ink,
-          elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: const BorderSide(color: Pal.ink, width: 1.4)),
-          onPressed: _locate,
-          child: const Icon(Icons.my_location),
+        Positioned(
+          left: 8,
+          bottom: 4,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text('© contributeurs OpenStreetMap', style: body(10, c: Pal.inkSoft)),
+          ),
         ),
+        if (!_loading && dumps.isEmpty && _error == null)
+          Positioned(
+            bottom: 30,
+            left: 16,
+            right: 90,
+            child: AppCard(
+              padding: const EdgeInsets.all(12),
+              child: Text('Aucun dépotoir dans ce filtre.', style: body(13, c: Pal.inkSoft)),
+            ),
+          ),
+      ],
+    );
+    return Column(
+      children: [
+        Expanded(child: stack),
+        _panel(s),
+      ],
+    );
+  }
+
+  Widget _panel(Session s) {
+    final t = _lastSync;
+    final hm = t == null
+        ? '—'
+        : '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    Widget dot(Color c, String label) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: body(12, w: FontWeight.w600, c: Pal.inkSoft),
+        ),
+      ],
+    );
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Wrap(
+            spacing: 14,
+            runSpacing: 4,
+            children: [
+              dot(statusColor('verified'), 'Confirmé'),
+              dot(statusColor('scheduled'), 'Programmé'),
+              dot(statusColor('cleaned'), 'Nettoyé'),
+              dot(statusColor('pending'), 'En attente'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () async {
+              final ok = await launchUrl(
+                Uri.parse('${s.api.base.replaceAll(RegExp(r'/+$'), '')}/api/public/dumps.geojson'),
+                mode: LaunchMode.externalApplication,
+              );
+              if (!ok && mounted) toast(context, 'Impossible d’ouvrir le lien.', error: true);
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(color: Pal.primary, borderRadius: BorderRadius.circular(16)),
+              child: Row(
+                children: [
+                  const Icon(Icons.public, color: Colors.white),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Partager / exporter vers OpenStreetMap',
+                          style: head(14, w: FontWeight.w700, c: Colors.white),
+                        ),
+                        Text('GeoJSON ODbL • dépotoirs vérifiés', style: body(11, c: Colors.white70)),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                    decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8)),
+                    child: Text(
+                      'ODbL',
+                      style: body(11, w: FontWeight.w800, c: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              const Icon(Icons.circle, size: 8, color: Pal.primary),
+              const SizedBox(width: 6),
+              Text(
+                'Dernière synchro : $hm',
+                style: body(12, w: FontWeight.w600, c: Pal.inkSoft),
+              ),
+            ],
+          ),
+        ],
       ),
-    ]);
+    );
   }
 }

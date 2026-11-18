@@ -2,111 +2,96 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class Pal {
-  static const ground = Color(0xFFE6E9E1);
-  static const surface = Color(0xFFF5F6F1);
-  static const ink = Color(0xFF17262B);
-  static const inkSoft = Color(0xFF51636A);
-  static const line = Color(0xFFCBD1C6);
-  static const signal = Color(0xFFF2B705);
-  static const dump = Color(0xFFC8372D);
-  static const pending = Color(0xFFE08A1E);
-  static const planned = Color(0xFF2F6DB5);
-  static const cleaned = Color(0xFF2E7D5B);
-  static const point = Color(0xFF0E7C66);
+  static const primary = Color(0xFF10B981);
+  static const primaryDeep = Color(0xFF059669);
+  static const primaryFixed = Color(0xFFD1FAE5);
+  static const onPrimaryFixed = Color(0xFF065F46);
+  static const secondary = Color(0xFF2563EB);
+  static const secondaryFixed = Color(0xFFDBEAFE);
+  static const tertiary = Color(0xFFF59E0B);
+  static const tertiaryFixed = Color(0xFFFEF3C7);
+  static const tertiaryDeep = Color(0xFF92400E);
+  static const error = Color(0xFFEF4444);
+  static const errorSoft = Color(0xFFFEE2E2);
+  static const surface = Color(0xFFF8FAFC);
+  static const container = Color(0xFFF1F5F9);
+  static const line = Color(0xFFE2E8F0);
+  static const ink = Color(0xFF0F172A);
+  static const inkSoft = Color(0xFF475569);
+  static const outline = Color(0xFF94A3B8);
 }
 
+TextStyle head(double size, {FontWeight w = FontWeight.w800, Color c = Pal.ink, double? h}) =>
+    GoogleFonts.plusJakartaSans(
+      fontSize: size,
+      fontWeight: w,
+      color: c,
+      height: h,
+      letterSpacing: -0.01 * size,
+    );
+
+TextStyle body(double size, {FontWeight w = FontWeight.w400, Color c = Pal.ink, double? h}) =>
+    GoogleFonts.inter(fontSize: size, fontWeight: w, color: c, height: h);
+
 ThemeData buildTheme() {
-  final base = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: Pal.ink,
-      primary: Pal.ink,
-      onPrimary: Pal.surface,
-      secondary: Pal.signal,
-      onSecondary: Pal.ink,
-      surface: Pal.surface,
-      error: Pal.dump,
-    ),
-    scaffoldBackgroundColor: Pal.ground,
+  final scheme = ColorScheme.fromSeed(seedColor: Pal.primary, brightness: Brightness.light).copyWith(
+    primary: Pal.primary,
+    onPrimary: Colors.white,
+    secondary: Pal.secondary,
+    tertiary: Pal.tertiary,
+    error: Pal.error,
+    surface: Pal.surface,
+    onSurface: Pal.ink,
   );
-  final body = GoogleFonts.hankenGroteskTextTheme(base.textTheme).apply(bodyColor: Pal.ink, displayColor: Pal.ink);
-  final head = GoogleFonts.bricolageGrotesque;
-  return base.copyWith(
-    textTheme: body.copyWith(
-      headlineMedium: head(fontSize: 28, fontWeight: FontWeight.w800, height: 1.05, color: Pal.ink),
-      titleLarge: head(fontSize: 21, fontWeight: FontWeight.w700, color: Pal.ink),
-      titleMedium: head(fontSize: 16, fontWeight: FontWeight.w700, color: Pal.ink),
-    ),
+  OutlineInputBorder border(Color c, [double w = 1]) => OutlineInputBorder(
+    borderRadius: BorderRadius.circular(14),
+    borderSide: BorderSide(color: c, width: w),
+  );
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: Pal.surface,
+    textTheme: GoogleFonts.interTextTheme(),
     appBarTheme: AppBarTheme(
-      backgroundColor: Pal.ground,
-      foregroundColor: Pal.ink,
+      backgroundColor: Pal.surface,
       elevation: 0,
       scrolledUnderElevation: 0,
-      titleTextStyle: head(fontSize: 20, fontWeight: FontWeight.w800, color: Pal.ink),
+      foregroundColor: Pal.ink,
+      titleTextStyle: head(18),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: Colors.white,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      border: border(Pal.line),
+      enabledBorder: border(Pal.line),
+      focusedBorder: border(Pal.primary, 1.8),
+      labelStyle: body(14, c: Pal.inkSoft),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        backgroundColor: Pal.ink,
-        foregroundColor: Pal.surface,
+        backgroundColor: Pal.primary,
+        foregroundColor: Colors.white,
         minimumSize: const Size.fromHeight(52),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-        textStyle: body.labelLarge?.copyWith(fontWeight: FontWeight.w700, fontSize: 15),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: GoogleFonts.plusJakartaSans(fontSize: 15, fontWeight: FontWeight.w700),
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
         foregroundColor: Pal.ink,
-        side: const BorderSide(color: Pal.ink, width: 1.4),
         minimumSize: const Size.fromHeight(48),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+        side: const BorderSide(color: Pal.line),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: GoogleFonts.plusJakartaSans(fontSize: 14, fontWeight: FontWeight.w700),
       ),
     ),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: Pal.surface,
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Pal.line)),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Pal.line)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Pal.ink, width: 1.6)),
-    ),
-    navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: Pal.surface,
-      indicatorColor: Pal.signal,
-      height: 66,
-      labelTextStyle: WidgetStatePropertyAll(body.labelSmall?.copyWith(fontWeight: FontWeight.w700)),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: Pal.ink,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      contentTextStyle: body(13, c: Colors.white),
     ),
     dividerTheme: const DividerThemeData(color: Pal.line, thickness: 1, space: 1),
-    sliderTheme: base.sliderTheme.copyWith(
-      activeTrackColor: Pal.ink,
-      inactiveTrackColor: Pal.line,
-      thumbColor: Pal.ink,
-      overlayColor: Pal.signal.withValues(alpha: 0.3),
-      trackHeight: 3,
-    ),
-    chipTheme: base.chipTheme.copyWith(
-      backgroundColor: Pal.surface,
-      selectedColor: Pal.ink,
-      side: const BorderSide(color: Pal.line),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-      labelStyle: body.labelLarge?.copyWith(fontWeight: FontWeight.w600),
-    ),
   );
-}
-
-class Plate extends StatelessWidget {
-  const Plate({super.key, required this.child, this.padding = const EdgeInsets.all(16), this.color});
-  final Widget child;
-  final EdgeInsets padding;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: double.infinity,
-        padding: padding,
-        decoration: BoxDecoration(
-          color: color ?? Pal.surface,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Pal.line),
-        ),
-        child: child,
-      );
 }

@@ -1,17 +1,20 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:uuid/uuid.dart';
 
 import '../core/api.dart';
 import '../core/i18n.dart';
 import '../core/models.dart';
-import '../core/motif.dart';
-import '../core/state.dart';
+import '../core/session.dart';
 import '../core/theme.dart';
+import '../widgets/common.dart';
+import 'voice_note.dart';
 
 class ReportScreen extends StatefulWidget {
   const ReportScreen({super.key});
@@ -21,32 +24,18 @@ class ReportScreen extends StatefulWidget {
 }
 
 class _ReportScreenState extends State<ReportScreen> {
+  final _picker = ImagePicker();
+  final _note = TextEditingController();
   XFile? _photo;
   Position? _pos;
-  String _locMsg = 'Recherche de votre position…';
-  String _size = 'medium';
-  String _type = 'household';
-  final _note = TextEditingController();
+  String? _gpsError;
+  bool _locating = false;
   bool _busy = false;
-  final _speech = stt.SpeechToText();
-  bool _listening = false;
-
-  Future<void> _dictate() async {
-    if (_listening) {
-      await _speech.stop();
-      setState(() => _listening = false);
-      return;
-    }
-    final ok = await _speech.initialize(onStatus: (s) {
-      if (s == 'done' && mounted) setState(() => _listening = false);
-    });
-    if (!ok) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Dictée indisponible sur ce téléphone')));
-      return;
-    }
-    setState(() => _listening = true);
-    await _speech.listen(localeId: 'fr_FR', onResult: (r) => setState(() => _note.text = r.recognizedWords));
-  }
+  bool _flood = false;
+  String _size = 'small';
+  String _waste = 'mixed';
+  Map<String, dynamic>? _result;
+  VoiceClip? _clip;
 
   @override
   void initState() {
@@ -54,177 +43,630 @@ class _ReportScreenState extends State<ReportScreen> {
     _locate();
   }
 
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
   Future<void> _locate() async {
+    final l = context.read<Lang>();
     setState(() {
-      _pos = null;
-      _locMsg = 'Recherche de votre position…';
+      _locating = true;
+      _gpsError = null;
     });
-    if (!await Geolocator.isLocationServiceEnabled()) {
-      setState(() => _locMsg = 'Activez la localisation du téléphone');
-      return;
-    }
-    var perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
-    if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
-      setState(() => _locMsg = 'Localisation refusée. Autorisez-la dans les réglages.');
-      return;
-    }
     try {
-      final p = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.best, timeLimit: Duration(seconds: 15)));
+      if (!await Geolocator.isLocationServiceEnabled()) throw l.t('report.gps.off');
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        throw l.t('report.gps.denied');
+      }
+      final p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 20),
+        ),
+      );
       if (mounted) setState(() => _pos = p);
-    } catch (_) {
-      if (mounted) setState(() => _locMsg = 'Position introuvable. Sortez à découvert puis réessayez.');
+    } catch (e) {
+      if (mounted) setState(() => _gpsError = e is String ? e : l.t('report.gps.notfound'));
+    } finally {
+      if (mounted) setState(() => _locating = false);
     }
   }
 
-  Future<void> _shoot() async {
-    final x = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 80, maxWidth: 1600);
-    if (x != null) setState(() => _photo = x);
+  Future<void> _take(ImageSource src) async {
+    try {
+      final f = await _picker.pickImage(source: src, maxWidth: 1600, imageQuality: 82);
+      if (f != null && mounted) setState(() => _photo = f);
+    } catch (_) {
+      if (mounted) toast(context, context.trRead('report.err.camera'), error: true);
+    }
   }
+
+  String _coords(Position p) =>
+      '${p.latitude.abs().toStringAsFixed(4)}° ${p.latitude >= 0 ? 'N' : 'S'}, ${p.longitude.abs().toStringAsFixed(4)}° ${p.longitude >= 0 ? 'E' : 'O'}';
 
   Future<void> _send() async {
-    final s = context.read<AppState>();
-    final nav = Navigator.of(context);
+    if (_photo == null) return toast(context, context.trRead('report.err.photo'), error: true);
+    if (_pos == null) return toast(context, context.trRead('report.err.gps'), error: true);
+    final s = context.read<Session>();
+    final note = [
+      if (_flood) '[Zone inondable / caniveau]',
+      if (_note.text.trim().isNotEmpty) _note.text.trim(),
+    ].join(' ');
+    final fields = <String, String>{
+      'client_id': const Uuid().v4(),
+      'lat': _pos!.latitude.toStringAsFixed(6),
+      'lon': _pos!.longitude.toStringAsFixed(6),
+      'accuracy_m': _pos!.accuracy.toStringAsFixed(0),
+      'size': _size,
+      'waste_type': _waste,
+      'captured_at': DateTime.now().toUtc().toIso8601String(),
+      if (note.isNotEmpty) 'note': note,
+    };
+    final clip = _clip;
     setState(() => _busy = true);
     try {
-      final r = await s.submitReport(
-        lat: _pos!.latitude,
-        lon: _pos!.longitude,
-        accuracy: _pos!.accuracy,
-        size: _size,
-        wasteType: _type,
-        photoPath: _photo!.path,
-        note: _note.text,
-      );
-      if (!mounted) return;
-      await _showResult(r);
-      if (r.status != 'rejected') nav.pop();
+      final j = await s.api.upload('/api/reports', fields, filePath: _photo!.path) as Map;
+      s.addPoints((j['points_awarded'] as num?)?.toInt() ?? 0);
+      var voicePending = false;
+      if (clip != null) {
+        try {
+          await s.api.upload(
+            '/api/voice',
+            {'client_id': fields['client_id']!, 'duration_s': '${clip.seconds}'},
+            filePath: clip.path,
+            field: 'audio',
+          );
+        } on ApiException catch (e) {
+          if (e.network || e.status >= 500 || e.status == 401 || e.status == 408 || e.status == 429) {
+            await s.outbox.addAudioOnly(fields['client_id']!, clip.path, clip.seconds);
+            await s.noteQueued();
+            voicePending = true;
+          }
+        }
+      }
+      if (clip != null) _deleteQuietly(clip.path);
+      if (mounted) {
+        setState(() {
+          _result = {...Map<String, dynamic>.from(j), if (voicePending) 'voice_pending': true};
+          _photo = null;
+          _clip = null;
+          _note.clear();
+          _flood = false;
+        });
+      }
     } on ApiException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.fields.isNotEmpty ? e.fields.join(', ') : e.message)));
+      if (e.network || e.status >= 500) {
+        await s.outbox.add(fields, _photo!.path, audioPath: clip?.path, audioSeconds: clip?.seconds ?? 0);
+        await s.noteQueued();
+        if (clip != null) _deleteQuietly(clip.path);
+        if (mounted) {
+          setState(() {
+            _photo = null;
+            _clip = null;
+            _note.clear();
+            _flood = false;
+            _result = {'queued': true};
+          });
+        }
+      } else if (mounted) {
+        toast(context, e.message, error: true);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _showResult(SubmitResult r) {
-    String title;
-    final lines = <String>[];
-    if (r.queued) {
-      title = 'Enregistré sur le téléphone';
-      lines.add('Pas de réseau pour le moment. Le signalement partira tout seul dès que la connexion reviendra.');
-    } else if (r.status == 'rejected') {
-      title = 'Signalement refusé';
-      lines.addAll(r.rejects.map((c) => rejectLabels[c] ?? c));
-    } else {
-      title = r.status == 'flagged' ? 'Reçu, à contrôler' : 'Signalement reçu';
-      if (r.points > 0) lines.add('+${r.points} points');
-      if (r.reporters > 1) lines.add('${r.reporters} personnes ont signalé ce lieu.');
-      if (r.dumpStatus == 'verified') lines.add('Le dépotoir est confirmé.');
-      lines.addAll(r.flags.map((f) => flagLabels[f] ?? f));
-    }
-    return showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [for (final l in lines) Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(l))]),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
-      ),
-    );
+  void _deleteQuietly(String path) {
+    File(path).delete().catchError((_) => File(path));
   }
 
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
-    final ready = _photo != null && _pos != null && !_busy;
-    final acc = _pos?.accuracy;
-    return Scaffold(
-      appBar: AppBar(title: Text(tr('report_title'))),
-      body: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 28), children: [
-        InkWell(
-          onTap: _shoot,
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            height: 210,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(color: Pal.surface, borderRadius: BorderRadius.circular(8), border: Border.all(color: Pal.ink, width: 1.6)),
-            child: _photo == null
-                ? Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    const Icon(Icons.photo_camera_outlined, size: 40),
-                    const SizedBox(height: 8),
-                    Text(tr('take_photo'), style: t.titleMedium),
-                    Text(tr('frame_hint'), style: t.bodySmall?.copyWith(color: Pal.inkSoft)),
-                  ])
-                : Stack(fit: StackFit.expand, children: [
-                    Image.file(File(_photo!.path), fit: BoxFit.cover),
-                    const Positioned(right: 8, bottom: 8, child: CircleAvatar(backgroundColor: Pal.signal, foregroundColor: Pal.ink, child: Icon(Icons.refresh))),
-                  ]),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Plate(
-          child: Row(children: [
-            Icon(_pos == null ? Icons.gps_not_fixed : Icons.gps_fixed, color: _pos == null ? Pal.inkSoft : acc! <= 30 ? Pal.cleaned : Pal.pending),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _pos == null
-                  ? Text(_locMsg)
-                  : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('${_pos!.latitude.toStringAsFixed(5)}, ${_pos!.longitude.toStringAsFixed(5)}', style: t.titleMedium),
-                      Text(acc! <= 30 ? 'Position précise (±${acc.round()} m)' : 'Position approximative (±${acc.round()} m). Sortez à découvert pour mieux la fixer.', style: t.bodySmall?.copyWith(color: Pal.inkSoft)),
-                    ]),
-            ),
-            IconButton(onPressed: _locate, icon: const Icon(Icons.refresh)),
-          ]),
-        ),
-        const SizedBox(height: 20),
-        Text(tr('which_size'), style: t.titleMedium),
-        const SizedBox(height: 8),
-        Row(children: [
-          for (final e in const ['small', 'medium', 'large'])
-            Expanded(
-              child: Padding(
-                padding: EdgeInsets.only(right: e == 'large' ? 0 : 8),
-                child: InkWell(
-                  onTap: () => setState(() => _size = e),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 6),
-                    decoration: BoxDecoration(
-                      color: _size == e ? Pal.signal : Pal.surface,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: _size == e ? Pal.ink : Pal.line, width: _size == e ? 1.8 : 1),
-                    ),
-                    child: Column(children: [
-                      MoundGlyph(level: e == 'small' ? 0 : e == 'medium' ? 1 : 2, color: Pal.surface, size: 52),
-                      const SizedBox(height: 4),
-                      Text(sizeLabels[e]!, style: const TextStyle(fontWeight: FontWeight.w800)),
-                      Text(sizeHints[e]!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, height: 1.2)),
-                    ]),
-                  ),
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+      children: [
+        Text(context.tr('report.title'), style: head(26)),
+        const SizedBox(height: 2),
+        Text(context.tr('report.subtitle'), style: body(14, c: Pal.inkSoft)),
+        if (_result != null) ...[
+          const SizedBox(height: 14),
+          _ResultCard(_result!, onClose: () => setState(() => _result = null)),
+        ],
+        const SizedBox(height: 16),
+        _photoCard(),
+        const SizedBox(height: 14),
+        _gpsCard(),
+        const SizedBox(height: 14),
+        VoiceNoteField(clip: _clip, onChanged: (c) => setState(() => _clip = c)),
+        const SizedBox(height: 14),
+        AppCard(
+          padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(color: Pal.secondaryFixed, borderRadius: BorderRadius.circular(12)),
+                child: const Icon(Icons.flood_outlined, color: Pal.secondary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(context.tr('report.flood.title'), style: head(14, w: FontWeight.w700)),
+                    const SizedBox(height: 2),
+                    Text(context.tr('report.flood.hint'), style: body(12, c: Pal.inkSoft)),
+                  ],
                 ),
               ),
-            ),
-        ]),
-        const SizedBox(height: 20),
-        Text(tr('which_type'), style: t.titleMedium),
+              Switch(
+                value: _flood,
+                activeTrackColor: Pal.primary,
+                onChanged: (v) => setState(() => _flood = v),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 22),
+        Text(context.tr('report.size.title'), style: head(17)),
+        const SizedBox(height: 10),
+        _sizeRow(
+          'small',
+          Icons.shopping_bag_outlined,
+          Pal.primaryDeep,
+          Pal.primaryFixed,
+          context.tr('report.size.small'),
+          context.tr('report.size.small.hint'),
+        ),
         const SizedBox(height: 8),
-        Wrap(spacing: 8, runSpacing: 8, children: [
-          for (final e in wasteLabels.entries)
-            ChoiceChip(
-              label: Text(e.value),
-              selected: _type == e.key,
-              showCheckmark: false,
-              labelStyle: TextStyle(fontWeight: FontWeight.w700, color: _type == e.key ? Pal.surface : Pal.ink),
-              onSelected: (_) => setState(() => _type = e.key),
-            ),
-        ]),
+        _sizeRow(
+          'medium',
+          Icons.shopping_cart_outlined,
+          Pal.tertiaryDeep,
+          Pal.tertiaryFixed,
+          context.tr('report.size.medium'),
+          context.tr('report.size.medium.hint'),
+        ),
+        const SizedBox(height: 8),
+        _sizeRow(
+          'large',
+          Icons.warning_amber_rounded,
+          Pal.error,
+          Pal.errorSoft,
+          context.tr('report.size.large'),
+          context.tr('report.size.large.hint'),
+        ),
         const SizedBox(height: 20),
-        TextField(controller: _note, maxLength: 300, maxLines: 2, decoration: InputDecoration(labelText: 'Précision (facultatif)', hintText: 'Près du marché, côté caniveau…', suffixIcon: IconButton(tooltip: 'Dicter', onPressed: _dictate, icon: Icon(_listening ? Icons.mic : Icons.mic_none, color: _listening ? Pal.dump : Pal.ink)))),
-        const SizedBox(height: 12),
-        FilledButton(onPressed: ready ? _send : null, child: Text(_busy ? tr('sending') : tr('send_report'))),
-        if (!ready && !_busy) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_photo == null ? 'Prenez d’abord la photo.' : 'En attente de la position.', textAlign: TextAlign.center, style: t.bodySmall?.copyWith(color: Pal.inkSoft))),
-      ]),
+        Text(context.tr('report.waste.title'), style: head(17)),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final e in wasteLabels.entries)
+              ChoiceChip(
+                label: Text(context.tr('waste.${e.key}')),
+                selected: _waste == e.key,
+                onSelected: (_) => setState(() => _waste = e.key),
+                selectedColor: Pal.primaryFixed,
+                backgroundColor: Colors.white,
+                side: BorderSide(color: _waste == e.key ? Pal.primary : Pal.line),
+                labelStyle: body(
+                  13,
+                  w: FontWeight.w700,
+                  c: _waste == e.key ? Pal.onPrimaryFixed : Pal.inkSoft,
+                ),
+                showCheckmark: false,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(99)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        TextField(
+          controller: _note,
+          maxLength: 300,
+          maxLines: 3,
+          decoration: InputDecoration(
+            labelText: context.tr('report.note.label'),
+            hintText: context.tr('report.note.hint'),
+            alignLabelWithHint: true,
+          ),
+        ),
+        const SizedBox(height: 8),
+        FilledButton.icon(
+          onPressed: _busy ? null : _send,
+          icon: _busy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                )
+              : const Icon(Icons.send_rounded, size: 20),
+          label: Text(context.tr(_busy ? 'report.sending' : 'report.send')),
+        ),
+      ],
+    );
+  }
+
+  Widget _photoCard() {
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.add_a_photo_outlined, color: Pal.primaryDeep, size: 22),
+              const SizedBox(width: 8),
+              Expanded(child: Text(context.tr('report.photo.title'), style: head(16))),
+              _photo == null
+                  ? Pill(context.tr('report.required'), color: const Color(0xFF991B1B), bg: Pal.errorSoft)
+                  : Pill(context.tr('report.added')),
+            ],
+          ),
+          const SizedBox(height: 12),
+          GestureDetector(
+            onTap: () => _take(ImageSource.camera),
+            child: Container(
+              height: 190,
+              width: double.infinity,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(color: Pal.ink, borderRadius: BorderRadius.circular(16)),
+              child: _photo == null
+                  ? Stack(
+                      children: [
+                        Positioned.fill(child: CustomPaint(painter: _FramePainter())),
+                        Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.center_focus_weak, color: Colors.white54, size: 44),
+                              const SizedBox(height: 8),
+                              Text(context.tr('report.photo.hint'), style: body(14, c: Colors.white70)),
+                            ],
+                          ),
+                        ),
+                        Positioned(
+                          left: 14,
+                          bottom: 12,
+                          child: Text(
+                            context.tr('report.photo.none'),
+                            style: body(13, w: FontWeight.w600, c: Colors.white),
+                          ),
+                        ),
+                      ],
+                    )
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.file(File(_photo!.path), fit: BoxFit.cover),
+                        Positioned(
+                          right: 10,
+                          bottom: 10,
+                          child: CircleAvatar(
+                            backgroundColor: Pal.primary,
+                            foregroundColor: Colors.white,
+                            child: const Icon(Icons.refresh),
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                flex: 6,
+                child: FilledButton.icon(
+                  onPressed: () => _take(ImageSource.camera),
+                  style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+                  icon: const Icon(Icons.photo_camera_outlined, size: 20),
+                  label: Text(context.tr('report.photo.take')),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 5,
+                child: FilledButton.tonalIcon(
+                  onPressed: () => _take(ImageSource.gallery),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                    backgroundColor: Pal.container,
+                    foregroundColor: Pal.ink,
+                  ),
+                  icon: const Icon(Icons.photo_library_outlined, size: 20),
+                  label: Text(context.tr('report.photo.gallery', {'n': _photo == null ? '0' : '1'})),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _gpsCard() {
+    final p = _pos;
+    final good = p != null && p.accuracy <= 30;
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.location_on, color: Pal.primaryDeep, size: 22),
+              const SizedBox(width: 8),
+              Expanded(child: Text(context.tr('report.gps.title'), style: head(16))),
+              if (p != null)
+                Pill(
+                  '± ${p.accuracy.round()} m',
+                  color: good ? Pal.onPrimaryFixed : Pal.tertiaryDeep,
+                  bg: good ? Pal.primaryFixed : Pal.tertiaryFixed,
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(color: Pal.container, borderRadius: BorderRadius.circular(14)),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _locating
+                        ? context.tr('report.gps.searching')
+                        : (p == null ? (_gpsError ?? context.tr('report.gps.unknown')) : _coords(p)),
+                    style: p == null
+                        ? body(14, c: _gpsError != null ? Pal.error : Pal.inkSoft, h: 1.3)
+                        : head(18),
+                  ),
+                ),
+                if (p != null)
+                  Icon(good ? Icons.verified : Icons.info_outline, color: good ? Pal.primary : Pal.tertiary),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: SizedBox(
+              height: 130,
+              child: Stack(
+                children: [
+                  if (p != null)
+                    FlutterMap(
+                      key: ValueKey('${p.latitude}${p.longitude}'),
+                      options: MapOptions(
+                        initialCenter: LatLng(p.latitude, p.longitude),
+                        initialZoom: 17,
+                        interactionOptions: const InteractionOptions(flags: InteractiveFlag.none),
+                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                          userAgentPackageName: 'bf.ouagaclean.app',
+                        ),
+                        MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: LatLng(p.latitude, p.longitude),
+                              width: 40,
+                              height: 40,
+                              child: const Icon(Icons.location_pin, color: Pal.primaryDeep, size: 40),
+                            ),
+                          ],
+                        ),
+                      ],
+                    )
+                  else
+                    Container(
+                      color: const Color(0xFFCFE0E3),
+                      child: const Center(
+                        child: Icon(Icons.location_searching, color: Pal.inkSoft, size: 32),
+                      ),
+                    ),
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: Material(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(99),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(99),
+                        onTap: _locating ? null : _locate,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _locating
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : const Icon(Icons.near_me_outlined, size: 16, color: Pal.primaryDeep),
+                              const SizedBox(width: 6),
+                              Text(
+                                context.tr('report.gps.recalibrate'),
+                                style: head(13, w: FontWeight.w700, c: Pal.primaryDeep),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (p != null && p.accuracy > 50)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                context.tr('report.gps.low'),
+                style: body(12, c: Pal.tertiaryDeep),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sizeRow(String key, IconData icon, Color fg, Color bg, String title, String hint) {
+    final on = _size == key;
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => setState(() => _size = key),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: on ? Pal.primaryFixed.withValues(alpha: 0.55) : Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: on ? Pal.primary : Pal.line, width: on ? 2 : 1),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(13)),
+              child: Icon(icon, color: fg),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: head(15)),
+                  const SizedBox(height: 2),
+                  Text(hint, style: body(12, c: Pal.inkSoft, h: 1.3)),
+                ],
+              ),
+            ),
+            Icon(on ? Icons.check_circle : Icons.circle_outlined, color: on ? Pal.primary : Pal.outline),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FramePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..color = Colors.white30
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    const m = 22.0;
+    const l = 26.0;
+    final w = size.width;
+    final h = size.height;
+    for (final c in [
+      [m, m, 1.0, 1.0],
+      [w - m, m, -1.0, 1.0],
+      [m, h - m, 1.0, -1.0],
+      [w - m, h - m, -1.0, -1.0],
+    ]) {
+      final x = c[0];
+      final y = c[1];
+      canvas.drawLine(Offset(x, y), Offset(x + c[2] * l, y), p);
+      canvas.drawLine(Offset(x, y), Offset(x, y + c[3] * l), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_FramePainter old) => false;
+}
+
+class _ResultCard extends StatelessWidget {
+  const _ResultCard(this.r, {required this.onClose});
+  final Map<String, dynamic> r;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    if (r['queued'] == true) {
+      return _box(
+        Pal.tertiaryFixed,
+        Icons.cloud_upload_outlined,
+        Pal.tertiaryDeep,
+        context.tr('result.queued.title'),
+        context.tr('result.queued.text'),
+      );
+    }
+    final rep = (r['report'] as Map?) ?? {};
+    final dup = r['duplicate'] == true;
+    final status = rep['status'] as String?;
+    final pts = (r['points_awarded'] as num?)?.toInt() ?? 0;
+    if (status == 'rejected') {
+      final reasons = ((rep['reject_reasons'] as List?) ?? []).join(', ');
+      return _box(
+        Pal.errorSoft,
+        Icons.block,
+        const Color(0xFF991B1B),
+        context.tr('result.rejected.title'),
+        reasons.isEmpty ? context.tr('result.rejected.default') : reasons,
+      );
+    }
+    if (dup) {
+      return _box(
+        Pal.secondaryFixed,
+        Icons.copy_all_outlined,
+        Pal.secondary,
+        context.tr('result.dup.title'),
+        context.tr('result.dup.text'),
+      );
+    }
+    final base = pts > 0
+        ? context.tr('result.ok.points', {'n': '$pts'})
+        : context.tr('result.ok.text');
+    return _box(
+      Pal.primaryFixed,
+      Icons.check_circle_outline,
+      Pal.onPrimaryFixed,
+      context.tr('result.ok.title'),
+      r['voice_pending'] == true ? '$base ${context.tr('result.voice_pending')}' : base,
+    );
+  }
+
+  Widget _box(Color bg, IconData icon, Color fg, String title, String text) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(16)),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: fg),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: head(15, c: fg)),
+                const SizedBox(height: 2),
+                Text(text, style: body(13, c: fg, h: 1.35)),
+              ],
+            ),
+          ),
+          InkWell(
+            onTap: onClose,
+            child: Icon(Icons.close, size: 18, color: fg),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -1,104 +1,125 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
-const _defaultBase = String.fromEnvironment('API_BASE', defaultValue: 'http://10.0.2.2:3000');
+const kDefaultBase = String.fromEnvironment('API_BASE', defaultValue: 'http://10.0.2.2:3000');
 
 class ApiException implements Exception {
-  ApiException(this.status, this.code, this.message, [this.fields = const []]);
+  ApiException(this.status, this.message, [this.code]);
   final int status;
-  final String code;
   final String message;
-  final List<String> fields;
-  bool get isNetwork => status == 0;
+  final String? code;
+  bool get network => status == 0;
+  bool get unauthorized => status == 401;
   @override
   String toString() => message;
 }
 
 class Api {
-  String baseUrl = _defaultBase;
+  Api(this.base);
+  String base;
   String? token;
 
-  Future<void> restore() async {
-    final p = await SharedPreferences.getInstance();
-    baseUrl = p.getString('base_url') ?? _defaultBase;
-    token = p.getString('token');
-  }
+  String get _root => base.replaceAll(RegExp(r'/+$'), '');
 
-  Future<void> saveBase(String url) async {
-    baseUrl = url.trim().replaceAll(RegExp(r'/+$'), '');
-    final p = await SharedPreferences.getInstance();
-    await p.setString('base_url', baseUrl);
-  }
-
-  Future<void> saveToken(String? t) async {
-    token = t;
-    final p = await SharedPreferences.getInstance();
-    if (t == null) {
-      await p.remove('token');
-    } else {
-      await p.setString('token', t);
-    }
+  Uri _uri(String path, [Map<String, String>? q]) {
+    final u = Uri.parse('$_root$path');
+    return q == null || q.isEmpty ? u : u.replace(queryParameters: q);
   }
 
   Map<String, String> get _headers => {
-        if (token != null) 'Authorization': 'Bearer $token',
-      };
+    'Accept': 'application/json',
+    if (token != null) 'Authorization': 'Bearer $token',
+  };
 
-  String photoUrl(String? name) => name == null ? '' : '$baseUrl/uploads/$name';
+  Future<dynamic> get(String path, {Map<String, String>? query, int timeout = 25}) =>
+      _run(() => http.get(_uri(path, query), headers: _headers), timeout);
 
-  Future<dynamic> _send(Future<http.Response> Function() run) async {
-    http.Response res;
-    try {
-      res = await run().timeout(const Duration(seconds: 90));
-    } on SocketException {
-      throw ApiException(0, 'reseau', 'Pas de connexion au serveur');
-    } on http.ClientException {
-      throw ApiException(0, 'reseau', 'Pas de connexion au serveur');
-    } on Exception {
-      throw ApiException(0, 'reseau', 'Le serveur ne répond pas');
-    }
-    final body = res.body.isEmpty ? null : jsonDecode(utf8.decode(res.bodyBytes));
-    if (res.statusCode >= 200 && res.statusCode < 300) return body;
-    final map = body is Map ? body : const {};
-    final fields = (map['fields'] is List) ? (map['fields'] as List).map((f) => '${f['field']}: ${f['message']}').toList() : <String>[];
-    throw ApiException(res.statusCode, '${map['error'] ?? 'erreur'}', '${map['message'] ?? 'Erreur ${res.statusCode}'}', fields);
+  Future<dynamic> post(String path, [Map<String, dynamic>? body, int timeout = 25]) => _run(
+    () => http.post(
+      _uri(path),
+      headers: {..._headers, 'Content-Type': 'application/json'},
+      body: jsonEncode(body ?? {}),
+    ),
+    timeout,
+  );
+
+  Future<dynamic> upload(
+    String path,
+    Map<String, String> fields, {
+    String? filePath,
+    String field = 'photo',
+  }) {
+    return _run(() async {
+      final req = http.MultipartRequest('POST', _uri(path))
+        ..headers.addAll(_headers)
+        ..fields.addAll(fields);
+      if (filePath != null) req.files.add(await http.MultipartFile.fromPath(field, filePath));
+      return http.Response.fromStream(await req.send());
+    }, 60);
   }
 
-  Uri _u(String path, [Map<String, String>? q]) => Uri.parse('$baseUrl$path').replace(queryParameters: q);
-
-  Future<dynamic> get(String path, [Map<String, String>? q]) => _send(() => http.get(_u(path, q), headers: _headers));
-
-  Future<dynamic> post(String path, [Object? json]) => _send(() => http.post(
-        _u(path),
-        headers: {..._headers, 'Content-Type': 'application/json'},
-        body: jsonEncode(json ?? {}),
-      ));
-
-  Future<dynamic> put(String path, [Object? json]) => _send(() => http.put(
-        _u(path),
-        headers: {..._headers, 'Content-Type': 'application/json'},
-        body: jsonEncode(json ?? {}),
-      ));
-
-  Future<List<int>> postBytes(String path, [Object? json]) async {
+  Future<Uint8List> postBytes(String path, [Map<String, dynamic>? body, int timeout = 60]) async {
+    http.Response r;
     try {
-      final res = await http.post(_u(path), headers: {..._headers, 'Content-Type': 'application/json'}, body: jsonEncode(json ?? {})).timeout(const Duration(seconds: 90));
-      if (res.statusCode >= 200 && res.statusCode < 300) return res.bodyBytes;
-      final map = res.body.isEmpty ? const {} : jsonDecode(utf8.decode(res.bodyBytes));
-      throw ApiException(res.statusCode, '${map['error'] ?? 'erreur'}', '${map['message'] ?? 'Erreur ${res.statusCode}'}');
-    } on SocketException {
-      throw ApiException(0, 'reseau', 'Pas de connexion au serveur');
+      r = await http
+          .post(
+            _uri(path),
+            headers: {..._headers, 'Content-Type': 'application/json'},
+            body: jsonEncode(body ?? {}),
+          )
+          .timeout(Duration(seconds: timeout));
+    } on TimeoutException {
+      throw ApiException(0, 'Le serveur ne répond pas. Vérifiez la connexion.');
+    } catch (_) {
+      throw ApiException(0, 'Connexion impossible. Vérifiez le réseau et l’adresse du serveur.');
     }
+    if (r.statusCode >= 200 && r.statusCode < 300) return r.bodyBytes;
+    var msg = 'Erreur ${r.statusCode}';
+    try {
+      final d = jsonDecode(utf8.decode(r.bodyBytes));
+      if (d is Map) {
+        final e = d['error'];
+        msg = (e is Map ? e['message'] : (d['message'] ?? e))?.toString() ?? msg;
+      }
+    } catch (_) {}
+    throw ApiException(r.statusCode, msg);
   }
 
-  Future<dynamic> multipart(String path, Map<String, String> fields, {String? filePath, String fileField = 'photo'}) => _send(() async {
-        final req = http.MultipartRequest('POST', _u(path))
-          ..headers.addAll(_headers)
-          ..fields.addAll(fields);
-        if (filePath != null) req.files.add(await http.MultipartFile.fromPath(fileField, filePath));
-        return http.Response.fromStream(await req.send());
-      });
+  Future<dynamic> _run(Future<http.Response> Function() call, int timeout) async {
+    http.Response r;
+    try {
+      r = await call().timeout(Duration(seconds: timeout));
+    } on TimeoutException {
+      throw ApiException(0, 'Le serveur ne répond pas. Vérifiez la connexion.');
+    } catch (_) {
+      throw ApiException(0, 'Connexion impossible. Vérifiez le réseau et l’adresse du serveur.');
+    }
+    dynamic data;
+    if (r.body.isNotEmpty) {
+      try {
+        data = jsonDecode(utf8.decode(r.bodyBytes));
+      } catch (_) {
+        data = null;
+      }
+    }
+    if (r.statusCode >= 200 && r.statusCode < 300) return data;
+    var msg = 'Erreur ${r.statusCode}';
+    String? code;
+    if (data is Map) {
+      final e = data['error'];
+      if (e is Map) {
+        msg = (e['message'] ?? msg).toString();
+        code = e['code']?.toString();
+      } else {
+        msg = (data['message'] ?? e ?? msg).toString();
+        code = data['code']?.toString();
+      }
+    }
+    throw ApiException(r.statusCode, msg, code);
+  }
+
+  String photoUrl(String name) => name.startsWith('http') ? name : '$_root/uploads/$name';
 }

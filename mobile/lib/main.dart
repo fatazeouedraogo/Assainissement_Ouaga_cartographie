@@ -2,32 +2,37 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'core/i18n.dart';
-import 'core/state.dart';
+import 'core/session.dart';
 import 'core/theme.dart';
 import 'features/login_screen.dart';
 import 'features/shell.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  I18n.load();
-  runApp(ChangeNotifierProvider(create: (_) => AppState()..boot(), child: const OuagaApp()));
+  final session = await Session.load();
+  final lang = await Lang.load();
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: session),
+        ChangeNotifierProvider.value(value: lang),
+      ],
+      child: const OuagaCleanApp(),
+    ),
+  );
 }
 
-class OuagaApp extends StatelessWidget {
-  const OuagaApp({super.key});
+class OuagaCleanApp extends StatelessWidget {
+  const OuagaCleanApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final s = context.watch<AppState>();
+    final s = context.watch<Session>();
     return MaterialApp(
-      title: 'Ouaga Propre',
+      title: 'OuagaClean',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
-      home: s.booting
-          ? const Scaffold(body: Center(child: CircularProgressIndicator(color: Pal.ink)))
-          : s.user == null
-              ? const LoginScreen()
-              : const Shell(),
+      home: s.loggedIn ? const Shell() : const LoginScreen(),
     );
   }
 }
