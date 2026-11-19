@@ -179,5 +179,7 @@ Ce que le projet ne fait pas encore, ou ne fait qu'en partie :
 Les contributions de traduction (mooré, dioula) et de données de terrain sont particulièrement bienvenues.
 
 ## Équipe
+Projet réalisé par le groupe Atlas BF :
 
-Équipe Ouaga Propre — dépôt maintenu par [@fatazeouedraogo](https://github.com/fatazeouedraogo).
+- **SILGA Patricia**
+- **OUEDRAOGO Abdoul Fataze** ([@fatazeouedraogo](https://github.com/fatazeouedraogo))
