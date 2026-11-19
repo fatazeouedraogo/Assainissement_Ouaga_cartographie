@@ -1,3 +1,4 @@
+import { adminRoutes } from './routes/admin.js';
 import cors from 'cors';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
@@ -56,6 +57,9 @@ export function createApp() {
   app.use('/api/whatsapp', whatsappRoutes);
   app.use(express.static(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public'), { index: 'index.html' }));
 
+    app.use('/api/admin', adminRoutes);
+  const adminIndex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'admin', 'index.html');
+  app.get(/^\/admin(\/.*)?$/, (_req, res) => res.sendFile(adminIndex));
   app.use(notFound);
   app.use(errorHandler);
   return app;
